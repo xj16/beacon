@@ -70,6 +70,9 @@ class IngestPipelineIT {
     @Autowired
     KafkaListenerEndpointRegistry registry;
 
+    @Autowired
+    EventConsumer consumer;
+
     @Test
     void eventFlowsFromKafkaIntoElasticsearch() throws Exception {
         indexer.ensureIndex();
@@ -80,6 +83,8 @@ class IngestPipelineIT {
             ContainerTestUtils.waitForAssignment(container, 3);
         }
 
+        long before = consumer.indexedCount();
+
         LogEvent event = new LogEvent(
                 "it-evt-1", "orders-api-prod", "ERROR", "checkout exploded",
                 Instant.parse("2026-02-02T10:00:00Z"), "pod-prod-3", "trace-xyz",
@@ -87,6 +92,13 @@ class IngestPipelineIT {
 
         kafkaTemplate.send("beacon.events", event.id(), event).get();
 
+        // Stage 1: the Kafka listener consumed the event and successfully indexed it (no throw).
+        await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(1))
+                .untilAsserted(() ->
+                        assertTrue(consumer.indexedCount() > before,
+                                "listener should have consumed and indexed the event"));
+
+        // Stage 2: the document is retrievable from Elasticsearch with the enriched fields.
         await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
             esClient.indices().refresh(r -> r.index(indexer.index()));
             var response = esClient.get(g -> g.index(indexer.index()).id("it-evt-1"),
