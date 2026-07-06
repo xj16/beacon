@@ -35,7 +35,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Elasticsearch container; runs in CI via the {@code integrationTest} task.
  */
 @SpringBootTest
-@EmbeddedKafka(partitions = 1, topics = "beacon.events")
+@EmbeddedKafka(
+        partitions = 3,
+        topics = "beacon.events",
+        bootstrapServersProperty = "spring.kafka.bootstrap-servers")
 class IngestPipelineIT {
 
     static final ElasticsearchContainer ES =
@@ -51,9 +54,7 @@ class IngestPipelineIT {
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry registry) {
-        // EmbeddedKafka publishes its broker address under this system property.
-        registry.add("spring.kafka.bootstrap-servers",
-                () -> System.getProperty("spring.embedded.kafka.brokers"));
+        // Kafka's broker address is injected by @EmbeddedKafka via bootstrapServersProperty above.
         registry.add("beacon.elasticsearch.uri", () -> "http://" + ES.getHttpHostAddress());
     }
 
@@ -73,9 +74,10 @@ class IngestPipelineIT {
     void eventFlowsFromKafkaIntoElasticsearch() throws Exception {
         indexer.ensureIndex();
 
-        // Ensure the listener has its partition before we publish, so the event is not missed.
+        // Ensure the listener has all partitions assigned before we publish, so the event is not
+        // missed. The topic is provisioned with 3 partitions by the NewTopic bean.
         for (MessageListenerContainer container : registry.getListenerContainers()) {
-            ContainerTestUtils.waitForAssignment(container, 1);
+            ContainerTestUtils.waitForAssignment(container, 3);
         }
 
         LogEvent event = new LogEvent(
