@@ -1,0 +1,39 @@
+# Build output
+build/
+dist/
+bin/
+obj/
+out/
+target/
+*.log
+
+# Gradle
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Node (none used, but excluded per policy)
+node_modules/
+
+# Python (none used, but excluded per policy)
+__pycache__/
+.venv/
+venv/
+
+# Vagrant
+.vagrant/
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+*.classpath
+*.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
