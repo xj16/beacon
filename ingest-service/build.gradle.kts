@@ -20,9 +20,9 @@ dependencies {
     testImplementation("org.springframework.kafka:spring-kafka-test")
     testImplementation("org.awaitility:awaitility:4.2.1")
 
-    // Testcontainers for integration tests against real Kafka + Elasticsearch.
-    // Version is managed by Spring Boot's dependency management (spring-boot-dependencies).
+    // Testcontainers for a real Elasticsearch in integration tests; Kafka is provided by Spring's
+    // in-JVM EmbeddedKafka (from spring-kafka-test) for deterministic broker behaviour.
+    // Versions are managed by Spring Boot's dependency management (spring-boot-dependencies).
     testImplementation("org.testcontainers:junit-jupiter")
-    testImplementation("org.testcontainers:kafka")
     testImplementation("org.testcontainers:elasticsearch")
 }

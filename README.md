@@ -217,9 +217,10 @@ This is the project's "local model with graceful fallback" contract: it is fully
 ./gradlew build             # compile + unit tests + assemble
 ```
 
-Unit tests cover severity normalization, enrichment, the statistical scorer, and the Ollama
-reply parser/fallback. Integration tests spin up real Kafka and Elasticsearch and verify the full
-ingest→index→search→aggregate→score loop.
+Unit tests cover severity normalization, enrichment, the JSON serialize/deserialize round-trip,
+the statistical scorer, and the Ollama reply parser/fallback. Integration tests spin up a real
+Elasticsearch (Testcontainers) — plus an in-JVM Kafka broker for the ingest path — and verify the
+full ingest→index→search→aggregate→score loop.
 
 ---
 

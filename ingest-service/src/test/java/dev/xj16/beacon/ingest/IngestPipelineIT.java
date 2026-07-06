@@ -9,11 +9,10 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.MessageListenerContainer;
+import org.springframework.kafka.test.context.EmbeddedKafka;
 import org.springframework.kafka.test.utils.ContainerTestUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.KafkaContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.elasticsearch.ElasticsearchContainer;
 import org.testcontainers.utility.DockerImageName;
 
@@ -26,35 +25,35 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * End-to-end integration test: publish an event to a real Kafka broker, let the consumer enrich
- * and index it into a real Elasticsearch, then query it back.
+ * End-to-end integration test for the ingest pipeline: publish an event to Kafka, let the
+ * {@code @KafkaListener} enrich and index it into a real Elasticsearch, then read it back.
  *
- * <p>Both containers are started in a static initializer so their mapped ports are available when
- * Spring resolves {@code @DynamicPropertySource}. Requires a Docker daemon and so runs in CI (via
- * the dedicated {@code integrationTest} task) rather than the local "none" verify environment.
+ * <p>Kafka is provided by Spring's in-JVM {@link EmbeddedKafka} broker (deterministic and fast,
+ * exercising the exact same consumer + JSON serde + enrichment + indexing code path), while
+ * Elasticsearch is a real Testcontainers instance started in a static initializer so its mapped
+ * port is available when Spring resolves {@code @DynamicPropertySource}. Requires Docker for the
+ * Elasticsearch container; runs in CI via the {@code integrationTest} task.
  */
 @SpringBootTest
+@EmbeddedKafka(partitions = 1, topics = "beacon.events")
 class IngestPipelineIT {
-
-    static final KafkaContainer KAFKA =
-            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
 
     static final ElasticsearchContainer ES =
             new ElasticsearchContainer(
                     DockerImageName.parse("docker.elastic.co/elasticsearch/elasticsearch:8.14.3"))
                     .withEnv("xpack.security.enabled", "false")
                     .withEnv("discovery.type", "single-node")
-                    .waitingFor(Wait.forHttp("/").forPort(9200).forStatusCode(200)
-                            .withStartupTimeout(Duration.ofMinutes(3)));
+                    .withStartupTimeout(Duration.ofMinutes(3));
 
     static {
-        KAFKA.start();
         ES.start();
     }
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry registry) {
-        registry.add("spring.kafka.bootstrap-servers", KAFKA::getBootstrapServers);
+        // EmbeddedKafka publishes its broker address under this system property.
+        registry.add("spring.kafka.bootstrap-servers",
+                () -> System.getProperty("spring.embedded.kafka.brokers"));
         registry.add("beacon.elasticsearch.uri", () -> "http://" + ES.getHttpHostAddress());
     }
 
@@ -74,10 +73,9 @@ class IngestPipelineIT {
     void eventFlowsFromKafkaIntoElasticsearch() throws Exception {
         indexer.ensureIndex();
 
-        // Wait until the @KafkaListener has actually been assigned its partitions, so the event we
-        // publish below is guaranteed to be consumed rather than lost to a not-yet-joined consumer.
+        // Ensure the listener has its partition before we publish, so the event is not missed.
         for (MessageListenerContainer container : registry.getListenerContainers()) {
-            ContainerTestUtils.waitForAssignment(container, 3);
+            ContainerTestUtils.waitForAssignment(container, 1);
         }
 
         LogEvent event = new LogEvent(
@@ -87,7 +85,7 @@ class IngestPipelineIT {
 
         kafkaTemplate.send("beacon.events", event.id(), event).get();
 
-        await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
             esClient.indices().refresh(r -> r.index(indexer.index()));
             var response = esClient.get(g -> g.index(indexer.index()).id("it-evt-1"),
                     EnrichedEvent.class);
