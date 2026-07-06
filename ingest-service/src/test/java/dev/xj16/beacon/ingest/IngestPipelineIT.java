@@ -6,7 +6,10 @@ import dev.xj16.beacon.common.LogEvent;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.listener.MessageListenerContainer;
+import org.springframework.kafka.test.utils.ContainerTestUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.KafkaContainer;
@@ -64,16 +67,25 @@ class IngestPipelineIT {
     @Autowired
     ElasticsearchIndexer indexer;
 
+    @Autowired
+    KafkaListenerEndpointRegistry registry;
+
     @Test
     void eventFlowsFromKafkaIntoElasticsearch() throws Exception {
         indexer.ensureIndex();
+
+        // Wait until the @KafkaListener has actually been assigned its partitions, so the event we
+        // publish below is guaranteed to be consumed rather than lost to a not-yet-joined consumer.
+        for (MessageListenerContainer container : registry.getListenerContainers()) {
+            ContainerTestUtils.waitForAssignment(container, 3);
+        }
 
         LogEvent event = new LogEvent(
                 "it-evt-1", "orders-api-prod", "ERROR", "checkout exploded",
                 Instant.parse("2026-02-02T10:00:00Z"), "pod-prod-3", "trace-xyz",
                 Map.of("status", 500, "latency_ms", 1200));
 
-        kafkaTemplate.send("beacon.events", event.id(), event);
+        kafkaTemplate.send("beacon.events", event.id(), event).get();
 
         await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
             esClient.indices().refresh(r -> r.index(indexer.index()));

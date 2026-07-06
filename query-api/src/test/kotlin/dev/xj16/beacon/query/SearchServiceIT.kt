@@ -51,6 +51,19 @@ class SearchServiceIT {
 
     @BeforeAll
     fun seed() {
+        // Create the index with an explicit mapping so string dimensions are `keyword` (exact-match
+        // and aggregatable) and `message` is full-text — mirroring what the ingest service creates.
+        client.indices().create { c ->
+            c.index("beacon-events").mappings { m ->
+                m.properties("service") { p -> p.keyword { k -> k } }
+                    .properties("level") { p -> p.keyword { k -> k } }
+                    .properties("environment") { p -> p.keyword { k -> k } }
+                    .properties("severity") { p -> p.integer { i -> i } }
+                    .properties("message") { p -> p.text { t -> t } }
+                    .properties("timestamp") { p -> p.date { d -> d } }
+            }
+        }
+
         val docs = listOf(
             mapOf(
                 "id" to "1", "service" to "orders-api-prod", "level" to "ERROR", "severity" to 4,
