@@ -9,14 +9,8 @@ spring:
     consumer:
       group-id: ${beacon.kafka.group-id:beacon-ingest}
       auto-offset-reset: earliest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-      properties:
-        spring.json.value.default.type: dev.xj16.beacon.common.LogEvent
-        spring.json.trusted.packages: "dev.xj16.beacon.common"
-    producer:
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      # Serializers/deserializers are configured explicitly in KafkaConfig so that the Jackson
+      # ObjectMapper has the JavaTimeModule registered (LogEvent carries an Instant timestamp).
 
 beacon:
   kafka:
