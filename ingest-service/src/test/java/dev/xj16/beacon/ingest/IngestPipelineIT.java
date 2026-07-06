@@ -9,11 +9,9 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.containers.KafkaContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.elasticsearch.ElasticsearchContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 import java.time.Duration;
@@ -28,19 +26,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * End-to-end integration test: publish an event to a real Kafka broker, let the consumer enrich
  * and index it into a real Elasticsearch, then query it back.
  *
- * <p>Requires a Docker daemon and so is disabled in the local "none" verify environment; it runs
- * in CI where Docker is available. The {@code *IT} suffix keeps it out of the default unit-test
- * task if the build is configured to split them.
+ * <p>Both containers are started in a static initializer so their mapped ports are available when
+ * Spring resolves {@code @DynamicPropertySource}. Requires a Docker daemon and so runs in CI (via
+ * the dedicated {@code integrationTest} task) rather than the local "none" verify environment.
  */
 @SpringBootTest
-@Testcontainers
 class IngestPipelineIT {
 
-    @Container
     static final KafkaContainer KAFKA =
             new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
 
-    @Container
     static final ElasticsearchContainer ES =
             new ElasticsearchContainer(
                     DockerImageName.parse("docker.elastic.co/elasticsearch/elasticsearch:8.14.3"))
@@ -48,6 +43,11 @@ class IngestPipelineIT {
                     .withEnv("discovery.type", "single-node")
                     .waitingFor(Wait.forHttp("/").forPort(9200).forStatusCode(200)
                             .withStartupTimeout(Duration.ofMinutes(3)));
+
+    static {
+        KAFKA.start();
+        ES.start();
+    }
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry registry) {
@@ -75,7 +75,7 @@ class IngestPipelineIT {
 
         kafkaTemplate.send("beacon.events", event.id(), event);
 
-        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+        await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
             esClient.indices().refresh(r -> r.index(indexer.index()));
             var response = esClient.get(g -> g.index(indexer.index()).id("it-evt-1"),
                     EnrichedEvent.class);

@@ -11,22 +11,21 @@ import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 import org.testcontainers.elasticsearch.ElasticsearchContainer
-import org.testcontainers.junit.jupiter.Container
-import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
-import java.time.Instant
+import java.time.Duration
 
 /**
  * Integration test: index a handful of documents into a real Elasticsearch, then exercise the
  * [SearchService] full-text search and aggregations. Requires Docker; runs in CI.
+ *
+ * The Elasticsearch container is started in a static initializer (not via the JUnit `@Container`
+ * extension) so its mapped port is available when Spring resolves `@DynamicPropertySource`.
  */
 @SpringBootTest
-@Testcontainers
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SearchServiceIT {
 
     companion object {
-        @Container
         @JvmStatic
         val ES: ElasticsearchContainer =
             ElasticsearchContainer(
@@ -34,6 +33,8 @@ class SearchServiceIT {
             )
                 .withEnv("xpack.security.enabled", "false")
                 .withEnv("discovery.type", "single-node")
+                .withStartupTimeout(Duration.ofMinutes(3))
+                .apply { start() }
 
         @DynamicPropertySource
         @JvmStatic

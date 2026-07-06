@@ -45,6 +45,8 @@ subprojects {
         useJUnitPlatform()
         filter {
             includeTestsMatching("*IT")
+            // Modules without integration tests (e.g. :common) must not fail the task.
+            isFailOnNoMatchingTests = false
         }
         testClassesDirs = sourceSets["test"].output.classesDirs
         classpath = sourceSets["test"].runtimeClasspath

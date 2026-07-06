@@ -8,10 +8,9 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.elasticsearch.ElasticsearchContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 
@@ -23,17 +22,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Integration test for the scoring pass. Indexes unscored events into a real Elasticsearch, runs
  * one scoring batch (which falls back to the statistical scorer because no Ollama is present in
  * CI), and verifies scores are written back. Requires Docker; runs in CI.
+ *
+ * <p>The container is started in a static initializer so its mapped port is available when Spring
+ * resolves {@code @DynamicPropertySource}.
  */
 @SpringBootTest(properties = "beacon.ollama.base-url=http://localhost:1")
-@Testcontainers
 class AnomalyWorkerIT {
 
-    @Container
     static final ElasticsearchContainer ES =
             new ElasticsearchContainer(
                     DockerImageName.parse("docker.elastic.co/elasticsearch/elasticsearch:8.14.3"))
                     .withEnv("xpack.security.enabled", "false")
-                    .withEnv("discovery.type", "single-node");
+                    .withEnv("discovery.type", "single-node")
+                    .withStartupTimeout(Duration.ofMinutes(3));
+
+    static {
+        ES.start();
+    }
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry registry) {
