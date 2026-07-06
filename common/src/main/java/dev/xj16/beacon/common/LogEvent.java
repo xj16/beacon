@@ -1,5 +1,6 @@
 package dev.xj16.beacon.common;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
@@ -40,7 +41,8 @@ public record LogEvent(
         }
     }
 
-    /** True when this event carries an error-class severity. */
+    /** True when this event carries an error-class severity. Not a serialized property. */
+    @JsonIgnore
     public boolean isError() {
         if (level == null) {
             return false;
