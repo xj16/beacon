@@ -88,14 +88,32 @@ public class KafkaConfig {
     }
 
     /**
-     * A raw byte[] template used by the dead-letter recoverer. The failed record may not even
-     * deserialize into a {@link LogEvent}, so the DLT path must forward the original bytes verbatim.
+     * Template used by the dead-letter recoverer. It must serialize whatever the failed record
+     * actually carries, which depends on <em>how</em> the record failed:
+     * <ul>
+     *   <li>a <strong>deserialization</strong> failure surfaces the original raw {@code byte[]}
+     *       payload (via {@link ErrorHandlingDeserializer}) — publish those bytes verbatim;</li>
+     *   <li>an <strong>indexing</strong> failure (retries exhausted) carries a real
+     *       {@link LogEvent} value — publish it as JSON.</li>
+     * </ul>
+     * The key is always a {@link String} (the consumer uses {@link StringDeserializer}), so a
+     * {@link StringSerializer} keys the template and a {@link DelegatingByTypeSerializer} routes the
+     * value by its runtime type. Getting this wrong is why a naive {@code byte[]/byte[]} template
+     * throws {@code ClassCastException: String cannot be cast to [B} on publish.
      */
     @Bean
-    public KafkaTemplate<byte[], byte[]> deadLetterKafkaTemplate() {
+    public KafkaTemplate<Object, Object> deadLetterKafkaTemplate() {
         Map<String, Object> props = kafkaProperties.buildProducerProperties(null);
-        ProducerFactory<byte[], byte[]> pf =
-                new DefaultKafkaProducerFactory<>(props, new ByteArraySerializer(), new ByteArraySerializer());
+        // A single type-routing serializer used for both key and value. Keys are always Strings; the
+        // value is a byte[] (deserialization failure) or a LogEvent (indexing failure).
+        org.apache.kafka.common.serialization.Serializer<Object> serializer =
+                new org.springframework.kafka.support.serializer.DelegatingByTypeSerializer(
+                        Map.of(
+                                byte[].class, new ByteArraySerializer(),
+                                LogEvent.class, new JsonSerializer<>(objectMapper()),
+                                String.class, new StringSerializer()));
+        ProducerFactory<Object, Object> pf =
+                new DefaultKafkaProducerFactory<>(props, serializer, serializer);
         return new KafkaTemplate<>(pf);
     }
 
@@ -118,12 +136,13 @@ public class KafkaConfig {
 
     /**
      * Routes failed/poison records to {@code <topic>.DLT} after retries are exhausted (or immediately
-     * for records that cannot be deserialized). Uses the raw byte[] template because the payload may
-     * be un-parseable.
+     * for records that cannot be deserialized). The template's {@link DelegatingByTypeSerializer}
+     * copes with both a raw {@code byte[]} payload (deserialization failure) and a real
+     * {@link LogEvent} (indexing failure).
      */
     @Bean
     public DeadLetterPublishingRecoverer deadLetterPublishingRecoverer(
-            KafkaTemplate<byte[], byte[]> deadLetterKafkaTemplate) {
+            KafkaTemplate<Object, Object> deadLetterKafkaTemplate) {
         return new DeadLetterPublishingRecoverer(deadLetterKafkaTemplate);
     }
 
