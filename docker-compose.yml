@@ -69,3 +69,86 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+
+  # --- Beacon services --------------------------------------------------------
+  # One image per service, all built from the same multi-stage Dockerfile.
+  ingest-service:
+    build:
+      context: .
+      args:
+        SERVICE: ingest-service
+    image: beacon/ingest-service
+    container_name: beacon-ingest
+    ports:
+      - "8081:8081"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      ELASTICSEARCH_URI: "http://elasticsearch:9200"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+  query-api:
+    build:
+      context: .
+      args:
+        SERVICE: query-api
+    image: beacon/query-api
+    container_name: beacon-query
+    ports:
+      - "8082:8082"
+    environment:
+      ELASTICSEARCH_URI: "http://elasticsearch:9200"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  anomaly-worker:
+    build:
+      context: .
+      args:
+        SERVICE: anomaly-worker
+    image: beacon/anomaly-worker
+    container_name: beacon-anomaly
+    ports:
+      - "8083:8083"
+    environment:
+      ELASTICSEARCH_URI: "http://elasticsearch:9200"
+      # Use the real Postgres metadata store instead of the embedded H2 default.
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/beacon"
+      SPRING_DATASOURCE_USERNAME: "beacon"
+      SPRING_DATASOURCE_PASSWORD: "beacon"
+      # Postgres is already initialised by postgres-init.sql, so the app must not re-run data.sql.
+      SPRING_SQL_INIT_MODE: "never"
+      # Set SLACK_WEBHOOK_URL here to deliver alerts to Slack; unset falls back to logging.
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # --- Demo seeder (profile: demo) --------------------------------------------
+  # `docker compose --profile demo up` brings the stack up already populated with realistic events
+  # and immediately triggers an anomaly-scoring pass, so the dashboard at http://localhost:8082 is
+  # alive on first load. This one-shot container exits after seeding.
+  seed:
+    image: curlimages/curl:8.8.0
+    container_name: beacon-seed
+    profiles: ["demo"]
+    depends_on:
+      ingest-service:
+        condition: service_started
+      query-api:
+        condition: service_started
+      anomaly-worker:
+        condition: service_started
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["sh", "/scripts/demo-seed.sh"]
+    environment:
+      INGEST_URL: "http://ingest-service:8081"
+      QUERY_URL: "http://query-api:8082"
+      ANOMALY_URL: "http://anomaly-worker:8083"

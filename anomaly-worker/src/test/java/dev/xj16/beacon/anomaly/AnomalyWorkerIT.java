@@ -1,6 +1,8 @@
 package dev.xj16.beacon.anomaly;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import dev.xj16.beacon.anomaly.alert.Alert;
+import dev.xj16.beacon.anomaly.alert.AlertService;
 import dev.xj16.beacon.common.EnrichedEvent;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -54,6 +56,9 @@ class AnomalyWorkerIT {
     @Autowired
     HybridScorer scorer;
 
+    @Autowired
+    AlertService alertService;
+
     @Test
     void scoresUnscoredEvents() throws Exception {
         EnrichedEvent e1 = new EnrichedEvent(
@@ -83,6 +88,17 @@ class AnomalyWorkerIT {
         var doc2 = client.get(g -> g.index("beacon-events").id("a2"), EnrichedEvent.class);
         assertNotNull(doc2.source().anomalyScore());
         assertTrue(doc2.source().anomalyScore() < 0.3, "benign info should score low");
+
+        // The scoring pass also drives the alerting engine end-to-end: the FATAL OOM on the seeded
+        // orders-api-prod service breaches its rule and fires exactly one alert; the benign INFO
+        // event does not.
+        var alerts = alertService.recentAlerts(50);
+        assertEquals(1, alerts.stream().filter(a -> "a1".equals(a.getEventId())).count(),
+                "high-scoring fatal event should fire one alert");
+        assertTrue(alerts.stream().noneMatch(a -> "a2".equals(a.getEventId())),
+                "benign event must not fire an alert");
+        Alert fired = alerts.stream().filter(a -> "a1".equals(a.getEventId())).findFirst().orElseThrow();
+        assertEquals("checkout", fired.getTeam(), "alert should carry the team from the service catalog");
 
         // Re-running should find nothing new to score.
         client.indices().refresh(r -> r.index("beacon-events"));

@@ -1,5 +1,9 @@
 server:
   port: 8081
+  # Bound request bodies so an oversized payload is rejected before it is buffered.
+  max-http-request-header-size: 16KB
+  tomcat:
+    max-swallow-size: 2MB
 
 spring:
   application:
@@ -11,6 +15,9 @@ spring:
       auto-offset-reset: earliest
       # Serializers/deserializers are configured explicitly in KafkaConfig so that the Jackson
       # ObjectMapper has the JavaTimeModule registered (LogEvent carries an Instant timestamp).
+  servlet:
+    multipart:
+      max-request-size: 1MB
 
 beacon:
   kafka:
@@ -20,12 +27,15 @@ beacon:
   elasticsearch:
     uri: ${ELASTICSEARCH_URI:http://localhost:9200}
     index: beacon-events
+  ratelimit:
+    # Max requests per client IP per minute on /api/**. Set to 0 to disable.
+    per-minute: ${BEACON_RATELIMIT_PER_MINUTE:600}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: always

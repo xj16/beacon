@@ -16,6 +16,9 @@ dependencies {
     implementation("co.elastic.clients:elasticsearch-java:8.14.3")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
 
+    // Self-instrumentation: Prometheus scrape endpoint at /actuator/prometheus.
+    implementation("io.micrometer:micrometer-registry-prometheus")
+
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.kafka:spring-kafka-test")
     testImplementation("org.awaitility:awaitility:4.2.1")

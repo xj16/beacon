@@ -1,0 +1,11 @@
+.git
+.github
+.gradle
+**/build
+build
+dashboard
+*.md
+!README.md
+.idea
+.vscode
+scratch_*

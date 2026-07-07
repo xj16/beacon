@@ -2,7 +2,12 @@ package dev.xj16.beacon.anomaly;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.query_dsl.Query;
+import co.elastic.clients.elasticsearch.core.BulkRequest;
+import co.elastic.clients.elasticsearch.core.BulkResponse;
+import dev.xj16.beacon.anomaly.alert.AlertService;
 import dev.xj16.beacon.common.EnrichedEvent;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -10,15 +15,18 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Scheduled worker that finds events which have not yet been scored, scores them with the
- * {@link HybridScorer}, and writes the {@code anomaly_score} back onto each document.
+ * {@link HybridScorer}, writes the {@code anomaly_score} back onto each document, and hands each
+ * scored event to the {@link AlertService} so breaching events fire alerts.
  *
- * <p>It queries for documents missing the {@code anomaly_score} field, scores a bounded batch, and
- * updates them. Running on a fixed delay keeps Elasticsearch load predictable.
+ * <p>Score write-back uses a single Elasticsearch {@code _bulk} request per batch rather than one
+ * HTTP round-trip per event, so the pipeline sustains a firehose instead of stalling on network
+ * latency. Running on a fixed delay keeps Elasticsearch load predictable.
  */
 @Component
 public class AnomalyWorker {
@@ -27,18 +35,26 @@ public class AnomalyWorker {
 
     private final ElasticsearchClient client;
     private final HybridScorer scorer;
+    private final AlertService alertService;
     private final String index;
     private final int batchSize;
+    private final Timer scoringTimer;
 
     public AnomalyWorker(
             ElasticsearchClient client,
             HybridScorer scorer,
+            AlertService alertService,
+            MeterRegistry meterRegistry,
             @Value("${beacon.elasticsearch.index:beacon-events}") String index,
             @Value("${beacon.anomaly.batch-size:100}") int batchSize) {
         this.client = client;
         this.scorer = scorer;
+        this.alertService = alertService;
         this.index = index;
         this.batchSize = batchSize;
+        this.scoringTimer = Timer.builder("beacon_scoring_latency")
+                .description("Time to score one batch of events")
+                .register(meterRegistry);
     }
 
     /**
@@ -61,21 +77,50 @@ public class AnomalyWorker {
             return 0;
         }
 
-        int updated = 0;
+        // Score the whole batch, then flush the score write-backs in a single _bulk request.
+        record Scored(String id, EnrichedEvent event, double score) {
+        }
+        List<Scored> scored = new ArrayList<>(hits.size());
+        long start = System.nanoTime();
         for (var hit : hits) {
             EnrichedEvent event = hit.source();
             if (event == null) {
                 continue;
             }
-            double score = scorer.score(event);
-            String id = hit.id();
-            client.update(u -> u
-                    .index(index)
-                    .id(id)
-                    .doc(Map.of("anomaly_score", score)), EnrichedEvent.class);
-            updated++;
+            scored.add(new Scored(hit.id(), event, scorer.score(event)));
         }
-        log.info("Scored {} events using {} backend", updated, scorer.name());
+        scoringTimer.record(System.nanoTime() - start, java.util.concurrent.TimeUnit.NANOSECONDS);
+
+        if (scored.isEmpty()) {
+            return 0;
+        }
+
+        BulkRequest.Builder bulk = new BulkRequest.Builder();
+        for (Scored s : scored) {
+            bulk.operations(op -> op.update(u -> u
+                    .index(index)
+                    .id(s.id())
+                    .action(a -> a.doc(Map.of("anomaly_score", s.score())))));
+        }
+        BulkResponse bulkResponse = client.bulk(bulk.build());
+        if (bulkResponse.errors()) {
+            long failures = bulkResponse.items().stream()
+                    .filter(i -> i.error() != null)
+                    .count();
+            log.warn("Bulk score write-back had {} failed item(s)", failures);
+        }
+
+        // Evaluate alert rules against each scored event (idempotent per event id).
+        int alertsFired = 0;
+        for (Scored s : scored) {
+            if (alertService.evaluate(s.event(), s.score()).isPresent()) {
+                alertsFired++;
+            }
+        }
+
+        int updated = scored.size();
+        log.info("Scored {} events using {} backend ({} alert(s) fired)",
+                updated, scorer.name(), alertsFired);
         return updated;
     }
 

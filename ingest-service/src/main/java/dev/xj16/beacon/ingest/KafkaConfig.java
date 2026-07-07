@@ -7,9 +7,12 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.xj16.beacon.common.LogEvent;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.context.annotation.Bean;
@@ -18,24 +21,45 @@ import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
+import org.springframework.kafka.listener.ContainerProperties;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
+import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.kafka.support.serializer.JsonSerializer;
+import org.springframework.util.backoff.ExponentialBackOff;
 
 import java.util.Map;
 
 /**
  * Kafka wiring for the ingest service.
  *
- * <p>Declares the events topic and, crucially, builds the producer/consumer factories with a
- * Jackson {@link ObjectMapper} that has the {@link JavaTimeModule} registered so {@code Instant}
- * fields on {@link LogEvent} serialize/deserialize correctly. The consumer's value deserializer is
- * wrapped in an {@link ErrorHandlingDeserializer} so a malformed record surfaces as a handled error
- * instead of stalling the listener.
+ * <p>Declares the events topic and builds the producer/consumer factories with a Jackson
+ * {@link ObjectMapper} that has the {@link JavaTimeModule} registered so {@code Instant} fields on
+ * {@link LogEvent} serialize/deserialize correctly. The consumer's value deserializer is wrapped in
+ * an {@link ErrorHandlingDeserializer} so a malformed record surfaces as a handled error instead of
+ * stalling the listener.
+ *
+ * <p><strong>Reliability.</strong> The listener container is configured with:
+ * <ul>
+ *   <li>{@link ContainerProperties.AckMode#RECORD} — the consumer offset is committed only after
+ *       the listener returns successfully, so a document is never marked consumed before it is
+ *       indexed (at-least-once);</li>
+ *   <li>a {@link DefaultErrorHandler} with {@linkplain ExponentialBackOff exponential backoff} that
+ *       retries transient failures (e.g. a brief Elasticsearch blip) instead of dropping them;</li>
+ *   <li>a {@link DeadLetterPublishingRecoverer} that routes a record which still fails after the
+ *       retries — or which cannot be deserialized at all — to the
+ *       {@code beacon.events.DLT} dead-letter topic, so a poison message never wedges the pipeline.
+ * </ul>
+ * This is what makes the README's "retry / route to a DLT" and "a spike never takes down producers"
+ * claims real rather than aspirational.
  */
 @Configuration
 public class KafkaConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(KafkaConfig.class);
 
     private final KafkaProperties kafkaProperties;
 
@@ -54,15 +78,25 @@ public class KafkaConfig {
     public ProducerFactory<String, LogEvent> producerFactory() {
         Map<String, Object> props = kafkaProperties.buildProducerProperties(null);
         JsonSerializer<LogEvent> valueSerializer = new JsonSerializer<>(objectMapper());
-        DefaultKafkaProducerFactory<String, LogEvent> factory =
-                new DefaultKafkaProducerFactory<>(props, new StringSerializer(), valueSerializer);
-        return factory;
+        return new DefaultKafkaProducerFactory<>(props, new StringSerializer(), valueSerializer);
     }
 
     @Bean
-    public org.springframework.kafka.core.KafkaTemplate<String, LogEvent> kafkaTemplate(
+    public KafkaTemplate<String, LogEvent> kafkaTemplate(
             ProducerFactory<String, LogEvent> producerFactory) {
-        return new org.springframework.kafka.core.KafkaTemplate<>(producerFactory);
+        return new KafkaTemplate<>(producerFactory);
+    }
+
+    /**
+     * A raw byte[] template used by the dead-letter recoverer. The failed record may not even
+     * deserialize into a {@link LogEvent}, so the DLT path must forward the original bytes verbatim.
+     */
+    @Bean
+    public KafkaTemplate<byte[], byte[]> deadLetterKafkaTemplate() {
+        Map<String, Object> props = kafkaProperties.buildProducerProperties(null);
+        ProducerFactory<byte[], byte[]> pf =
+                new DefaultKafkaProducerFactory<>(props, new ByteArraySerializer(), new ByteArraySerializer());
+        return new KafkaTemplate<>(pf);
     }
 
     @Bean
@@ -82,12 +116,47 @@ public class KafkaConfig {
                 new ErrorHandlingDeserializer<>(jsonDeserializer));
     }
 
+    /**
+     * Routes failed/poison records to {@code <topic>.DLT} after retries are exhausted (or immediately
+     * for records that cannot be deserialized). Uses the raw byte[] template because the payload may
+     * be un-parseable.
+     */
+    @Bean
+    public DeadLetterPublishingRecoverer deadLetterPublishingRecoverer(
+            KafkaTemplate<byte[], byte[]> deadLetterKafkaTemplate) {
+        return new DeadLetterPublishingRecoverer(deadLetterKafkaTemplate);
+    }
+
+    /**
+     * Error handler: retry with exponential backoff, then hand off to the dead-letter recoverer.
+     * Deserialization failures are not retryable (they will never succeed) and go straight to the DLT.
+     */
+    @Bean
+    public DefaultErrorHandler kafkaErrorHandler(DeadLetterPublishingRecoverer recoverer) {
+        ExponentialBackOff backOff = new ExponentialBackOff(500L, 2.0);
+        backOff.setMaxInterval(5_000L);
+        backOff.setMaxElapsedTime(30_000L); // give up after ~30s of retrying, then DLT
+        DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, backOff);
+        handler.addNotRetryableExceptions(
+                org.springframework.kafka.support.serializer.DeserializationException.class);
+        handler.setRetryListeners((record, ex, deliveryAttempt) ->
+                log.warn("Retry {} for record at {}-{}@{}: {}",
+                        deliveryAttempt, record.topic(), record.partition(), record.offset(),
+                        ex.getMessage()));
+        return handler;
+    }
+
     @Bean
     public org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory<String, LogEvent>
-            kafkaListenerContainerFactory(ConsumerFactory<String, LogEvent> consumerFactory) {
+            kafkaListenerContainerFactory(
+                    ConsumerFactory<String, LogEvent> consumerFactory,
+                    DefaultErrorHandler kafkaErrorHandler) {
         var factory =
                 new org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory<String, LogEvent>();
         factory.setConsumerFactory(consumerFactory);
+        factory.setCommonErrorHandler(kafkaErrorHandler);
+        // Commit the offset only after the listener successfully returns (at-least-once).
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.RECORD);
         return factory;
     }
 
@@ -96,6 +165,17 @@ public class KafkaConfig {
             @Value("${beacon.kafka.topic:beacon.events}") String topic,
             @Value("${beacon.kafka.partitions:3}") int partitions) {
         return TopicBuilder.name(topic)
+                .partitions(partitions)
+                .replicas(1)
+                .build();
+    }
+
+    /** The dead-letter topic that poison/failed records are routed to. */
+    @Bean
+    public NewTopic deadLetterTopic(
+            @Value("${beacon.kafka.topic:beacon.events}") String topic,
+            @Value("${beacon.kafka.partitions:3}") int partitions) {
+        return TopicBuilder.name(topic + ".DLT")
                 .partitions(partitions)
                 .replicas(1)
                 .build();

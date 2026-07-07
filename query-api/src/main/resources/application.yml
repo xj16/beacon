@@ -9,12 +9,16 @@ beacon:
   elasticsearch:
     uri: ${ELASTICSEARCH_URI:http://localhost:9200}
     index: beacon-events
+  cors:
+    # CORS allowlist for the dashboard SPA when it is hosted somewhere other than query-api's own
+    # origin (e.g. a portfolio embed). Comma-separated; empty means same-origin only.
+    allowed-origins: ${BEACON_CORS_ALLOWED_ORIGINS:}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: always

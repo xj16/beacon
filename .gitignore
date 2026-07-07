@@ -37,3 +37,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Local tooling / scratch
+.claude/
+scratch_*

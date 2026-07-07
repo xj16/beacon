@@ -5,6 +5,25 @@ spring:
   application:
     name: beacon-anomaly-worker
 
+  # Alerting metadata store. Defaults to an in-memory H2 so the worker (and its alerting engine)
+  # runs with zero external infrastructure. Point SPRING_DATASOURCE_URL/USERNAME/PASSWORD at the
+  # compose Postgres to use it instead — no code changes required.
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:mem:beacon;DB_CLOSE_DELAY=-1;MODE=PostgreSQL}
+    username: ${SPRING_DATASOURCE_USERNAME:sa}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+
+  jpa:
+    hibernate:
+      # Schema is owned by schema.sql (H2) / postgres-init.sql (Postgres), not Hibernate.
+      ddl-auto: none
+    open-in-view: false
+
+  sql:
+    init:
+      # schema.sql + data.sql define and seed the metadata tables. Idempotent, so safe on Postgres.
+      mode: always
+
 beacon:
   elasticsearch:
     uri: ${ELASTICSEARCH_URI:http://localhost:9200}
@@ -16,12 +35,15 @@ beacon:
   anomaly:
     interval-ms: 15000
     batch-size: 100
+  alert:
+    # Set SLACK_WEBHOOK_URL to deliver alerts to Slack; unset falls back to the logging channel.
+    slack-webhook-url: ${SLACK_WEBHOOK_URL:}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: always
